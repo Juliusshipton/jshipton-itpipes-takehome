@@ -10,3 +10,6 @@ npm install
 npm run test:legacy
 npm run test:improved
 ```
+## Video Explination
+
+https://www.loom.com/share/ba8b9e3d9f2b4d0ab940340ef4b6f3d8
