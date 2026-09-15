@@ -115,22 +115,29 @@ stateDiagram-v2
   failed --> [*]
 ```
  
-**Ownership.** The API owns the transition to `queued`. The worker owns every transition after that. Nothing else writes job state.
- 
+This is the flow after the v1 changes above. Where today's proposal does something different, I say so.
+
+**Who owns what.** DynamoDB holds job state. The API writes `queued`; the worker writes everything after that. SQS owns delivery and retries. S3 owns the bytes. Nothing else touches job state.
+
 ### Import
- 
-1. Caller `POST`s an S3 reference and an idempotency key. API writes the job as `queued` and sends one message to the import queue. Returns the jobId.
-2. A worker receives the message and conditionally moves `queued → running`, guarded on the job not already being terminal. If the guard fails, another worker owns it; ack and stop.
-3. The converter writes JSON to `jobs/{jobId}/result.json`.
-4. **The result is published to S3 before any status write.** The status write is what makes it visible.
-5. Worker conditionally writes `succeeded` with the `outputKey`, guarded on the job still being `running` for this attempt. Then acks.
-6. Caller learns the outcome by polling the job API, or from the optional webhook, fired after the status write and never able to change the job's outcome.
+
+1. Caller `POST`s an S3 key and an idempotency key. The API writes the job as `queued`, puts one message on the import queue, and returns the jobId.
+2. A worker picks up the message and moves the job `queued → running` with a conditional write. If the row changed since it was read, another worker got there first. Ack and stop. (Today this is a plain put, and both workers run the job.)
+3. The converter writes JSON to `jobs/{jobId}/attempts/{n}/result.json`. Every attempt gets its own key. (Today every attempt writes to the same key.)
+4. Bytes land in S3 before any status changes. The status write is what makes the result visible.
+5. The worker conditionally writes `succeeded` with the `outputKey`, guarded on the job still being `running` for this attempt. If a faster attempt already published, the write is refused and this output is left unreferenced. Then ack.
+6. The caller polls the job API or gets the optional webhook. The webhook fires after the status write and cannot change the outcome.
+
 ### Export
- 
-Identical, with three differences: the message goes to the export queue; the worker heartbeats the visibility timeout while the JVM runs; the package is written to S3 by multipart upload, and the pointer swap in step 5 is what makes it visible.
- 
-**Retry boundaries.** Transient failures (including exit 137) return the message to the queue and SQS increments `receiveCount`. Permanent failures (exit 2 — malformed input) mark the job `failed` immediately with the converter's message; retrying cannot help. Past `maxReceiveCount` the message moves to the DLQ and the job is marked `failed`. Attempts write to attempt-scoped keys and are promoted to the canonical result only on the guarded status write, so a late attempt cannot overwrite a published result.
- 
+
+Same flow, three differences. The message goes to the export queue. That queue's visibility timeout is set to the export ceiling, 90 minutes, so a running JVM is never redelivered mid-run and v1 needs no heartbeat. (Today one queue shares one timeout with imports.) The package goes to S3 as a multipart upload, and the pointer swap in step 5 is what publishes it.
+
+**Retry boundaries.**
+
+- **Transient** (exit 137, timeout): if it timed out, kill and reap the converter first. Then hand the message back and let SQS bump `receiveCount`. The job stays `running`.
+- **Permanent** (exit 2, broken file): mark the job `failed` with the converter's message and ack. No retries. The customer needs to hear the file is broken, not wait through three attempts. (Today exit 2 is retried like everything else.)
+- **Past `maxReceiveCount`:** SQS moves the message to the DLQ. (Today the handler counts to three itself and deletes the message, so the DLQ never sees anything.) The job still reads `running` while it sits there. An operator inspects, fixes the cause, and redrives, or fails the job by hand. The clean fix is a `retrying` state, which is a caller-visible change, so it is on the later list, not v1.
+
 ---
  
 ## Operations, deployment, and observability
