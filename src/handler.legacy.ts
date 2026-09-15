@@ -1,5 +1,5 @@
-// Verbatim from ASSIGNMENT.md, "Starter worker". This file is the control in the
-// experiment and is frozen. The only change is the type-only import below.
+// Verbatim from ASSIGNMENT.md, "Starter worker". Frozen. The only change is
+// the type-only import below.
 
 import type { Clock, Converter, JobStore, QueueMessage } from "./types.js";
 
