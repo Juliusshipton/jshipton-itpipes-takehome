@@ -159,41 +159,48 @@ Infrastructure lives in the repo as CDK — queues, DLQs, task definitions, scal
 ---
  
 ## Sizing and cost
- 
-### Onboarding evening — 3,000 jobs
- 
-Stated mix: 80/20 → **2,400 imports, 600 exports**. Using the upper end of the stated durations, 3 min per import and 30 min per export.
- 
-- Import work: 2,400 × 3 min = **120 conversion-hours**
-- Export work: 600 × 30 min = **300 conversion-hours**
-Concurrency per task is capped by `min(vCPU, memory ÷ 2 GB)`.
- 
-- **Import task:** 2 vCPU / 8 GB → 2 concurrent. Drain target 2 hours → 60 concurrent → **30 tasks**.
-- **Export task:** 1 vCPU / 4 GB, ephemeral storage above the largest package → 1 concurrent. Drain target 6 hours (overnight) → 50 concurrent → **50 tasks**.
-Scale-out is not instant: the fleet starts at zero, target-tracking takes a few minutes to react, and tasks must pull an image and start. The first jobs of the evening wait several minutes regardless of fleet size. Scale-in must be slow, and must not use CPU as its signal — a task running a 30-minute export looks idle.
- 
-### Normal volume — 1,000 jobs/day
- 
-- 800 imports × 3 min = 40 conversion-hours/day
-- 200 exports × 30 min = 100 conversion-hours/day
-- ≈ **140 conversion-hours/day ≈ 4,200/month**, with export tasks accounting for roughly 70% of it.
-### Line items to price
- 
-- **Fargate** — vCPU-hours and GB-hours for the import fleet (2 vCPU / 8 GB tasks) and export fleet (1 vCPU / 4 GB tasks), ~4,200 task-hours/month plus burst headroom
-- **Fargate ephemeral storage** — GB-month above the 20 GB included, on export tasks only
-- **S3 storage** — result objects at 90-day retention: ~24,000 imports/month at up to 500 MB, ~6,000 exports/month at 10–40 GB
-- **S3 requests** — PUT (including multipart parts) and GET per job
-- **S3 data transfer out** — export packages downloaded by customers
-- **DynamoDB** — on-demand reads and writes, ~10 operations per job, plus storage at 90-day retention
-- **SQS** — requests across both queues and both DLQs, including empty long-poll receives
-- **Lambda + API Gateway** — one invocation and one request per submission, plus polling
-- **CloudWatch** — custom metrics from EMF, log ingestion and storage, alarms
-- **ECR** — image storage
-- **NAT Gateway** — hourly plus per-GB, if tasks run in private subnets without S3 and DynamoDB VPC endpoints
-**Expected biggest line item: S3 storage.** Exports dominate — 6,000 packages a month at 10–40 GB held for 90 days is on the order of a petabyte-month of resident data, and nothing else in this system is in that range.
- 
-**Single change that would cut it the most:** shorten export package retention, or move packages to a cheaper class after the first few days. Metadata retention is 90 days because customers need job history; the 40 GB artifact itself is typically downloaded once, within hours. A lifecycle rule to Infrequent Access or Glacier Instant Retrieval after ~7 days, with a shorter expiry on the package than on the metadata, addresses the largest cost without touching the customer-facing contract. **This needs confirmation** — see NOTES.md — that no customer relies on re-downloading a package weeks later.
- 
+
+**Assumptions.** The brief gives ranges, so I picked numbers and wrote them down:
+
+- 3 minutes per import and 30 per export, the top of the stated ranges.
+- One conversion per 1 vCPU / 4 GB task. Export tasks get 60 GB of ephemeral storage.
+- An export package averages 25 GB, an import result 0.5 GB. Results stay in S3 for 90 days, same as the metadata. Input files live in the caller's bucket, not on this bill.
+- Packages get downloaded once, by customer software outside AWS. This is the assumption that swings the bill the most, see below.
+- us-east-1 list prices, rounded. The point is the shape of the bill, not the cents. The pricing calculator is the source of truth.
+
+### The onboarding evening: 3,000 jobs
+
+80/20 mix, so 2,400 imports and 600 exports.
+
+| Fleet | Work | Drain target | Tasks needed |
+|---|---|---|---|
+| Import | 2,400 × 3 min = 120 task-hours | 2 hours | 60 |
+| Export | 600 × 30 min = 300 task-hours | 6 hours, overnight | 50 |
+
+Peak is 110 tasks, 110 vCPU. Compute for the whole evening is about $25, so money is not the problem. Two other things are. Scaling from zero takes a few minutes for the alarm to fire and tasks to pull the image, so the first jobs wait no matter how big the fleet is. And 110 concurrent Fargate vCPU is above the default quota on a fresh account, so the quota needs raising before the first onboarding, not during it. Scale-in has to be slow and must not key off CPU, because a task in the middle of a 30 minute export looks idle.
+
+### Normal volume: 1,000 jobs a day
+
+**Compute.** 800 × 3 min = 40 task-hours, plus 200 × 30 min = 100 task-hours, so 140 task-hours a day. A 1 vCPU / 4 GB task is about $0.058 an hour. That is $8 a day, roughly $250 a month, call it $400 with idle polling and retries.
+
+**Storage.** 200 packages × 25 GB = 5 TB a day. Kept 90 days, that is 450 TB sitting in S3 at any time. Imports add about 36 TB. Around 486 TB at roughly $0.022 per GB-month is about $10,700 a month.
+
+**Egress.** 5 TB a day out to customers is 150 TB a month. Tiered internet egress on that is about $11,300. If the consuming software runs in the same region, this line is close to zero.
+
+| Line item | Monthly, rough |
+|---|---|
+| S3 storage, ~486 TB resident | ~$10,700 |
+| Data transfer out, 150 TB, only if packages leave AWS | ~$11,300 |
+| Fargate, both fleets | ~$400 |
+| DynamoDB, SQS, Lambda, API Gateway, CloudWatch, ECR | under $50 combined |
+| **Total** | **~$11k a month in-region, ~$22k if packages leave AWS** |
+
+One trap worth naming. If the workers sit in private subnets and reach S3 through a NAT gateway, that is roughly 12 TB a day of inputs and outputs through NAT at $0.045 per GB, about $16,000 a month, more than everything else combined. Gateway endpoints for S3 and DynamoDB are free and make it zero. That goes in the CDK on day one.
+
+**Biggest line item: S3 storage.** Exports are 5 TB a day and nothing else in the system is in that range.
+
+**The single change that cuts it the most:** a lifecycle rule that moves packages to Glacier Instant Retrieval after 7 days. Seven days in Standard plus 83 days at $0.004 per GB comes to about $2,500 a month instead of $10,700. That is roughly 75% off, and a late re-download still works, it just costs 3 cents a GB. This needs one check with the customer teams: does anyone re-download a package weeks later? If not, expiring packages at 30 days cuts it further still.
+
 ---
  
 ## What addresses each production observation
