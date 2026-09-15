@@ -1,4 +1,56 @@
 # Design Review — Legacy File Conversion Service
+
+```mermaid
+flowchart TD
+  CALLER["<b>Caller services</b><br/>Other ITpipes teams"]
+  API["<b>API Gateway + Lambda</b><br/>Accepts jobs"]
+  DDB["<b>DynamoDB</b><br/>Job metadata"]
+  SQS["<b>SQS queue</b><br/>Imports and exports"]
+  DLQ["<b>Dead letter queue</b><br/>After repeated failures"]
+  WORKERS["<b>Fargate workers</b><br/>1 vCPU, 4 GB, 10 at once"]
+  S3["<b>S3</b><br/>Inputs and results"]
+  HOOK["<b>Completion webhook</b><br/>Optional, retried"]
+
+  CALLER --> API
+  API --> DDB
+  API --> SQS
+  SQS --> DLQ
+  SQS --> WORKERS
+  WORKERS --> DDB
+  WORKERS --> S3
+  WORKERS --> HOOK
+
+  classDef caller fill:#efede6,stroke:#7a776f,color:#3d3b36
+  classDef compute fill:#ecebff,stroke:#5b4fcf,color:#3a2fa0
+  classDef storage fill:#e2f5ee,stroke:#3d8f6f,color:#1f6b4f
+
+  class CALLER caller
+  class API,SQS,WORKERS,HOOK compute
+  class DDB,DLQ,S3 storage
+```
+
+```mermaid
+erDiagram
+  JOB {
+    string id PK
+    string inputKey "S3 reference from caller"
+    string status "queued, running, succeeded, failed"
+    number attempt "count of worker attempts"
+    string outputKey "S3 result key, set on success"
+    string error "set on failure"
+  }
+
+  S3_INPUT {
+    string key "caller-owned object"
+  }
+
+  S3_RESULT {
+    string key "jobs/{jobId}/result"
+  }
+
+  S3_INPUT ||--|| JOB : "inputKey"
+  JOB ||--o| S3_RESULT : "outputKey"
+```
  
 Assumptions and open questions are in NOTES.md.
  
@@ -45,6 +97,16 @@ SQS standard queues deliver at least once, and the team has already observed two
 ---
  
 ## Job lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued
+  queued --> running
+  running --> succeeded
+  running --> failed
+  succeeded --> [*]
+  failed --> [*]
+```
  
 **Ownership.** The API owns the transition to `queued`. The worker owns every transition after that. Nothing else writes job state.
  
