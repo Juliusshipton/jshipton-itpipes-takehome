@@ -5,7 +5,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:legacy": "vitest run tests/legacy.spec.ts --reporter=verbose"
+    "test:legacy": "vitest run tests/legacy.spec.ts --reporter=verbose",
+    "test:improved": "vitest run tests/improved.spec.ts --reporter=verbose"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

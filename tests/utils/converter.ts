@@ -1,4 +1,4 @@
-import type { Converter, RunningConversion } from "../../src/types.js";
+import type { Converter, RunningConversion } from "../../src/types.improved.js";
 
 /** The error a converter run produces, carrying the process exit code. */
 export class ConverterExitError extends Error {

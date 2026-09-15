@@ -1,4 +1,4 @@
-import type { Clock } from "../../src/types.js";
+import type { Clock } from "../../src/types.improved.js";
 
 /** Clock whose timeouts fire only when the test says so. No real waiting. */
 export class FakeClock implements Clock {

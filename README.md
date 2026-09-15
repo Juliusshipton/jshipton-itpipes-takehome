@@ -1,4 +1,12 @@
-# Legacy File Conversion Worker
+# Julius Shipton IT Pipes Takehome
 
-`npm install`, then `npm run test:legacy` runs the shared scenarios in `tests/scenarios.ts` against the frozen starter handler.
-The production scenarios are expected to fail: they document the defects the revised handler will fix.
+Thank you for taking the time to review my submission!  I am very excited about the opportunity to be apart of IT Pipes.  
+
+I have written one group of scenarios that can be run against the legacy handler and the improved handler.  The legacy handler fails for the test cases that explicitly reproduce the production findings, and the improved handler addressess these failures and passes for all test cases.
+
+```bash
+npm install
+
+npm run test:legacy
+npm run test:improved
+```

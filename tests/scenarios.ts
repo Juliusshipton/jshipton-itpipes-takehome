@@ -6,7 +6,7 @@
 // saw go wrong in production. The original handler fails every one of them.
 
 import { describe, expect, it } from "vitest";
-import type { Clock, Converter, Job, JobStore, QueueMessage } from "../src/types.js";
+import type { Clock, Converter, Job, JobStore, QueueMessage } from "../src/types.improved.js";
 import { FakeClock } from "./utils/clock.js";
 import { ConverterExitError, FakeConverter } from "./utils/converter.js";
 import { FakeMessage } from "./utils/message.js";
@@ -33,7 +33,7 @@ function job(overrides: Partial<Job> = {}): Job {
 
 // A big city database that takes half an hour to package up.
 function exportJob(overrides: Partial<Job> = {}): Job {
-  return job({ inputKey: "exports/job-1.json", ...overrides });
+  return job({ inputKey: "exports/job-1.json", jobType: "export", ...overrides });
 }
 
 const flakyCrash = () => new ConverterExitError(137, "killed");

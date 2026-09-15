@@ -1,4 +1,4 @@
-import type { QueueMessage } from "../../src/types.js";
+import type { QueueMessage } from "../../src/types.improved.js";
 
 /** QueueMessage that counts ack() and retry() calls. Stands in for an SQS delivery. */
 export class FakeMessage implements QueueMessage {
