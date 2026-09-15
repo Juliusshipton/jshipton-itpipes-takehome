@@ -57,43 +57,50 @@ Assumptions and open questions are in NOTES.md.
 ---
  
 ## Risk ranking
- 
-### 1. The proposed worker cannot execute the stated workload
- 
-A conversion needs ~2 GB and is single-threaded. The proposal runs 10 concurrently on a 1 vCPU / 4 GB task. That is 20 GB requested from a 4 GB container, and 10 single-threaded jobs sharing one core. Fargate also gives a task 20 GB of ephemeral storage by default, against export packages of 10–40 GB.
- 
-**Impact:** exports cannot complete at all — no disk, no memory, no CPU share. Imports complete slowly and unpredictably. Customers see jobs that fail with no useful error, retry, and fail again.
- 
-### 2. One queue and one fleet for two different workloads
- 
-Imports take seconds to minutes; exports take tens of minutes. Visibility timeout is a per-queue setting, so no single value is correct: sized for imports, every export is redelivered mid-flight and processed twice; sized for exports, a crashed import worker holds its message for 30+ minutes. Separately, a fast import can sit behind a long export, and onboarding bursts are import-heavy, so the two workloads contend for the same capacity at exactly the wrong time.
- 
-**Impact:** duplicate work, unpredictable latency, and an import backlog during onboarding that looks like an outage to the customer being onboarded.
- 
-### 3. At-least-once delivery with no fencing on writes
- 
-SQS standard queues deliver at least once, and the team has already observed two deliveries under 100 ms apart. The handler reads the job, converts, then writes an object built from the pre-conversion read. Two workers can both convert and both publish; a slow attempt can overwrite a result a faster attempt already published.
- 
-**Impact:** this is the only failure here that is silent. The job reports success and the customer receives the wrong package. Municipal inspection data may not be checked for weeks.
- 
-### Deliberately left alone
- 
-**Webhook delivery guarantees.** Backoff retries are enough; callers can poll the job API, so a lost webhook is a latency problem, not a correctness one. **Revisit if** more than 1% of webhook deliveries exhaust their retries in a week, or any consumer tells us they cannot poll.
- 
-**Richer job states / progress reporting.** Four states are enough for v1. **Revisit if** exports routinely exceed ~60 minutes, or support tickets asking "is this stuck?" exceed roughly one a week — at that point callers need to distinguish *running* from *retrying*, which today look identical.
- 
+
+### 1. As proposed, no export ever finishes. Two separate reasons.
+
+The handler gives every job 30 seconds. Exports take tens of minutes, so every one of them times out. Fix that and they still die: the task is 1 vCPU / 4 GB running 10 conversions at 2 GB each. That is 20 GB asked of a 4 GB box, on one core. Fargate also hands out 20 GB of disk by default, and a package is 10 to 40 GB. This is the exit 137 the team keeps seeing, and why the same job passes later on a quieter worker.
+
+**Impact:** the export half of the product does not work. Imports mostly squeak through, slowly.
+
+### 2. Unfenced writes. The one failure nobody sees.
+
+SQS delivers at least once, and two copies of a job have already shown up under 100 ms apart. The handler reads the job, converts, and writes back what it read. Two workers can both run it and both publish. A slow attempt can land on top of a faster one.
+
+**Impact:** the job says succeeded and the customer gets the wrong package. Nothing alarms. Inspection data could be wrong for weeks before anyone notices.
+
+### 3. One queue and one fleet for two very different jobs
+
+Imports are seconds to minutes. Exports are tens of minutes. They share one queue, one visibility timeout, one task shape. Set the timeout for imports and every export gets redelivered mid-run. Set it for exports and a dead import worker sits on its message for half an hour. During an onboarding burst the fast imports queue up behind the slow exports.
+
+**Impact:** duplicate work, and an import backlog that looks like an outage to the customer being onboarded.
+
+### Leaving alone
+
+**Webhooks.** Retries with backoff are fine. Callers can poll, so a lost webhook is a latency problem. Revisit if more than 1% of deliveries exhaust their retries in a week, or a consumer says they cannot poll.
+
+**More job states.** Four is enough. Revisit if exports regularly pass an hour, or "is this stuck?" tickets come in more than about weekly. At that point callers need to tell running from retrying.
+
 ---
- 
+
 ## Smallest changes before v1
- 
-1. **Split into two queues and two fleets** — import and export — so visibility timeout, task shape, concurrency and scaling are set per workload.
-2. **Right-size the tasks.** Concurrency per task must not exceed vCPU count or `memory / 2 GB`. Export tasks get ephemeral storage above the largest package, or stream output to S3 rather than staging it locally.
-3. **Add `jobType` to the job record** so the worker can pick the right timeout, and so metrics can be split by workload.
-4. **Per-type timeouts plus a visibility heartbeat.** The 30-second constant fails every export by definition. Long conversions extend their own lease with `ChangeMessageVisibility` while running.
-5. **Terminate and reap on timeout.** A conversion that loses the timeout race must be killed, or the subprocess keeps its 2 GB and the task degrades with every abandoned job.
-6. **Conditional writes.** Guard job transitions on the state that was read, so a second or late writer loses instead of overwriting.
-7. **Let SQS own retries.** Remove the in-handler attempt limit so failures reach the DLQ instead of being acked away, and classify permanent failures (exit 2) so they fail on the first attempt.
-8. **Persist the idempotency key** with a lookup on it, so a resubmitted job returns the existing job rather than creating a duplicate.
+
+Cannot ship without these:
+
+1. **Per-type timeout, and kill what times out.** 15 minutes for imports, 90 for exports, picked from a `jobType` field on the job. A conversion that loses the race gets killed and reaped, or its 2 GB stays leased.
+2. **Fix the task shape.** One conversion per 1 vCPU / 4 GB task. Export tasks get ephemeral storage above 40 GB, or stream to S3.
+3. **Conditional writes on every state change.** Claim, publish, fail. If the row moved since you read it, you lose and ack.
+4. **Exit 2 fails on the first try.** A broken file does not get better with retries. Everything else goes back to the queue and SQS counts the attempts, so real failures reach the DLQ instead of being acked away.
+5. **Two queues, two fleets.** The visibility timeout has to differ and it is a per-queue setting. Everything else about the split can follow.
+
+Can wait:
+
+- **Visibility heartbeat.** Once the queues are split, set the export queue's visibility timeout to the export ceiling and skip the heartbeat in v1.
+- **Persisting the idempotency key** with a lookup. Once writes are fenced, a duplicate submission costs money but cannot corrupt anything.
+- **More job states.** See above.
+- **S3 lifecycle rule on export packages.** Cheap and worth doing early, but it does not gate v1.
+
 ---
  
 ## Job lifecycle
